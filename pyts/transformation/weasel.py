@@ -110,11 +110,6 @@ class WEASEL(BaseEstimator, TransformerMixin):
         Alphabet to use. If None, the first `n_bins` letters of the Latin
         alphabet are used.
 
-    Attributes
-    ----------
-    vocabulary_ : dict
-        A mapping of features indices to terms.
-
     References
     ----------
     .. [1] P. Schäfer, and U. Leser, "Fast and Accurate Time Series
@@ -173,7 +168,6 @@ class WEASEL(BaseEstimator, TransformerMixin):
         self._sfa_list = []
         self._vectorizer_list = []
         self._relevant_features_list = []
-        # self.vocabulary_ = {}
         
         sfa_kwargs = {
             "n_coefs"    : self.word_size,
