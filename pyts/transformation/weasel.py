@@ -10,6 +10,49 @@ from sklearn.feature_selection import chi2
 from ..approximation import SymbolicFourierApproximation
 from ..utils import windowed_view
 
+from joblib import Parallel, delayed
+
+
+def _weasel_fit(X, y, sfa_kwargs, chi2_threshold, window_size, window_step):
+    n_samples, n_timestamps = X.shape
+    
+    n_windows  = ((n_timestamps - window_size + window_step) // window_step)
+    
+    X_windowed = windowed_view(X, window_size=window_size, window_step=window_step)
+    X_windowed = X_windowed.reshape(n_samples * n_windows, window_size)
+    
+    sfa = SymbolicFourierApproximation(**sfa_kwargs)
+    
+    y_repeated = np.repeat(y, n_windows)
+    X_sfa = sfa.fit_transform(X_windowed, y_repeated)
+    
+    X_word = np.asarray([''.join(X_sfa[i]) for i in range(n_samples * n_windows)])
+    X_word = X_word.reshape(n_samples, n_windows)
+    
+    X_bow = np.asarray([' '.join(X_word[i]) for i in range(n_samples)])
+    vectorizer = CountVectorizer(ngram_range=(1, 2))
+    X_counts = vectorizer.fit_transform(X_bow)
+    chi2_statistics, _ = chi2(X_counts, y)
+    relevant_features = np.where(chi2_statistics > chi2_threshold)[0]
+    
+    return relevant_features, sfa, vectorizer, X_counts[:, relevant_features]
+
+
+def _weasel_transform(X, window_size, window_step, sfa, vectorizer, relevant_features):
+    n_samples, n_timestamps = X.shape
+    
+    n_windows  = ((n_timestamps - window_size + window_step) // window_step)
+    X_windowed = windowed_view(X, window_size=window_size, window_step=window_step)
+    X_windowed = X_windowed.reshape(n_samples * n_windows, window_size)
+    X_sfa      = sfa.transform(X_windowed)
+    
+    X_word     = np.asarray([''.join(X_sfa[i]) for i in range(n_samples * n_windows)])
+    X_word     = X_word.reshape(n_samples, n_windows)
+    X_bow      = np.asarray([' '.join(X_word[i]) for i in range(n_samples)])
+    X_counts   = vectorizer.transform(X_bow)[:, relevant_features]
+    
+    return X_counts
+
 
 class WEASEL(BaseEstimator, TransformerMixin):
     """Word ExtrAction for time SEries cLassification.
@@ -83,7 +126,7 @@ class WEASEL(BaseEstimator, TransformerMixin):
     def __init__(self, word_size=4, n_bins=4,
                  window_sizes=[0.1, 0.3, 0.5, 0.7, 0.9], window_steps=None,
                  anova=True, drop_sum=True, norm_mean=True, norm_std=True,
-                 strategy='entropy', chi2_threshold=2, alphabet=None):
+                 strategy='entropy', chi2_threshold=2, alphabet=None, n_jobs=1, verbose=10):
         self.word_size = word_size
         self.n_bins = n_bins
         self.window_sizes = window_sizes
@@ -96,8 +139,14 @@ class WEASEL(BaseEstimator, TransformerMixin):
         self.strategy = strategy
         self.chi2_threshold = chi2_threshold
         self.alphabet = alphabet
-
+        self.n_jobs = n_jobs
+        self.verbose = verbose
+    
     def fit(self, X, y):
+        _ = self.fit_transform(X, y)
+        return self
+    
+    def fit_transform(self, X, y):
         """Fit the model according to the given training data.
 
         Parameters
@@ -120,52 +169,29 @@ class WEASEL(BaseEstimator, TransformerMixin):
         window_sizes, window_steps = self._check_params(n_timestamps)
         self._window_sizes = window_sizes
         self._window_steps = window_steps
-
+        
         self._sfa_list = []
         self._vectorizer_list = []
         self._relevant_features_list = []
-        self.vocabulary_ = {}
-
-        for (window_size, window_step) in zip(window_sizes, window_steps):
-            n_windows = ((n_timestamps - window_size + window_step)
-                         // window_step)
-            X_windowed = windowed_view(
-                X, window_size=window_size, window_step=window_step
-            )
-            X_windowed = X_windowed.reshape(n_samples * n_windows, window_size)
-
-            sfa = SymbolicFourierApproximation(
-                n_coefs=self.word_size, drop_sum=self.drop_sum,
-                anova=self.anova, norm_mean=self.norm_mean,
-                norm_std=self.norm_std, n_bins=self.n_bins,
-                strategy=self.strategy, alphabet=self.alphabet
-            )
-            y_repeated = np.repeat(y, n_windows)
-            X_sfa = sfa.fit_transform(X_windowed, y_repeated)
-
-            X_word = np.asarray([''.join(X_sfa[i])
-                                 for i in range(n_samples * n_windows)])
-            X_word = X_word.reshape(n_samples, n_windows)
-
-            X_bow = np.asarray([' '.join(X_word[i]) for i in range(n_samples)])
-            vectorizer = CountVectorizer(ngram_range=(1, 2))
-            X_counts = vectorizer.fit_transform(X_bow)
-            chi2_statistics, _ = chi2(X_counts, y)
-            relevant_features = np.where(
-                chi2_statistics > self.chi2_threshold)[0]
-
-            old_length_vocab = len(self.vocabulary_)
-            vocabulary = {value: key
-                          for (key, value) in vectorizer.vocabulary_.items()}
-            for i, idx in enumerate(relevant_features):
-                self.vocabulary_[i + old_length_vocab] = \
-                    str(window_size) + " " + vocabulary[idx]
-
-            self._relevant_features_list.append(relevant_features)
-            self._sfa_list.append(sfa)
-            self._vectorizer_list.append(vectorizer)
-
-        return self
+        # self.vocabulary_ = {}
+        
+        sfa_kwargs = {
+            "n_coefs"    : self.word_size,
+            "drop_sum"   : self.drop_sum,
+            "anova"      : self.anova,
+            "norm_mean"  : self.norm_mean,
+            "norm_std"   : self.norm_std,
+            "n_bins"     : self.n_bins,
+            "strategy"   : self.strategy,
+            "alphabet"   : self.alphabet
+        }
+        
+        gen  = zip(window_sizes, window_steps)
+        jobs = [delayed(_weasel_fit)(X, y, sfa_kwargs, self.chi2_threshold, *args) for args in gen]
+        res  = Parallel(n_jobs=self.n_jobs, verbose=self.verbose)(jobs)
+        
+        self._relevant_features_list, self._sfa_list, self._vectorizer_list, X_features = zip(*res)
+        return hstack(X_features)
 
     def transform(self, X):
         """Transform the provided data.
@@ -181,108 +207,24 @@ class WEASEL(BaseEstimator, TransformerMixin):
             Document-term matrix with relevant features only.
 
         """
-        check_is_fitted(self, ['_relevant_features_list', '_sfa_list',
-                               '_vectorizer_list', 'vocabulary_'])
-
+        check_is_fitted(self, ['_relevant_features_list', '_sfa_list', '_vectorizer_list'])
+        
         X = check_array(X)
         n_samples, n_timestamps = X.shape
-
+        
         X_features = csc_matrix((n_samples, 0), dtype=np.int64)
-
-        for (window_size, window_step, sfa,
-             vectorizer, relevant_features) in zip(
-                 self._window_sizes, self._window_steps, self._sfa_list,
-                 self._vectorizer_list, self._relevant_features_list):
-
-            n_windows = ((n_timestamps - window_size + window_step)
-                         // window_step)
-            X_windowed = windowed_view(
-                X, window_size=window_size, window_step=window_step
-            )
-            X_windowed = X_windowed.reshape(n_samples * n_windows, window_size)
-            X_sfa = sfa.transform(X_windowed)
-
-            X_word = np.asarray([''.join(X_sfa[i])
-                                 for i in range(n_samples * n_windows)])
-            X_word = X_word.reshape(n_samples, n_windows)
-            X_bow = np.asarray([' '.join(X_word[i]) for i in range(n_samples)])
-            X_counts = vectorizer.transform(X_bow)[:, relevant_features]
-            X_features = hstack([X_features, X_counts])
-
-        return X_features
-
-    def fit_transform(self, X, y):
-        """Fit the data then transform it.
-
-        Parameters
-        ----------
-        X : array-like, shape = (n_samples, n_timestamps)
-            Train samples.
-
-        y : None or array-like, shape = (n_samples,)
-            Class labels for each data sample.
-
-        Returns
-        -------
-        X_new : array, shape (n_samples, n_words)
-            Document-term matrix.
-
-        """
-        X, y = check_X_y(X, y)
-        check_classification_targets(y)
-        n_samples, n_timestamps = X.shape
-        window_sizes, window_steps = self._check_params(n_timestamps)
-        self._window_sizes = window_sizes
-        self._window_steps = window_steps
-
-        self._sfa_list = []
-        self._vectorizer_list = []
-        self._relevant_features_list = []
-        self.vocabulary_ = {}
-
-        X_features = csc_matrix((n_samples, 0), dtype=np.int64)
-
-        for (window_size, window_step) in zip(window_sizes, window_steps):
-            n_windows = ((n_timestamps - window_size + window_step)
-                         // window_step)
-            X_windowed = windowed_view(
-                X, window_size=window_size, window_step=window_step
-            )
-            X_windowed = X_windowed.reshape(n_samples * n_windows, window_size)
-
-            sfa = SymbolicFourierApproximation(
-                n_coefs=self.word_size, drop_sum=self.drop_sum,
-                anova=self.anova, norm_mean=self.norm_mean,
-                norm_std=self.norm_std, n_bins=self.n_bins,
-                strategy=self.strategy, alphabet=self.alphabet
-            )
-            y_repeated = np.repeat(y, n_windows)
-            X_sfa = sfa.fit_transform(X_windowed, y_repeated)
-
-            X_word = np.asarray([''.join(X_sfa[i])
-                                 for i in range(n_samples * n_windows)])
-            X_word = X_word.reshape(n_samples, n_windows)
-
-            X_bow = np.asarray([' '.join(X_word[i]) for i in range(n_samples)])
-            vectorizer = CountVectorizer(ngram_range=(1, 2))
-            X_counts = vectorizer.fit_transform(X_bow)
-            chi2_statistics, _ = chi2(X_counts, y)
-            relevant_features = np.where(
-                chi2_statistics > self.chi2_threshold)[0]
-            X_features = hstack([X_features, X_counts[:, relevant_features]])
-
-            old_length_vocab = len(self.vocabulary_)
-            vocabulary = {value: key
-                          for (key, value) in vectorizer.vocabulary_.items()}
-            for i, idx in enumerate(relevant_features):
-                self.vocabulary_[i + old_length_vocab] = \
-                    str(window_size) + " " + vocabulary[idx]
-
-            self._relevant_features_list.append(relevant_features)
-            self._sfa_list.append(sfa)
-            self._vectorizer_list.append(vectorizer)
-
-        return X_features
+        
+        gen = zip(
+            self._window_sizes,
+            self._window_steps,
+            self._sfa_list,
+            self._vectorizer_list,
+            self._relevant_features_list
+        )
+        
+        jobs       = [delayed(_weasel_transform)(X, *args) for args in gen]
+        X_features = Parallel(n_jobs=self.n_jobs, verbose=self.verbose)(jobs)
+        return hstack(X_features)
 
     def _check_params(self, n_timestamps):
         if not isinstance(self.word_size, (int, np.integer)):
