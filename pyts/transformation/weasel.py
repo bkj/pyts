@@ -1,5 +1,6 @@
 """Code for Word ExtrAction for time SEries cLassification."""
 
+import sys
 import numpy as np
 from scipy.sparse import csc_matrix, hstack
 from sklearn.utils.validation import check_array, check_X_y, check_is_fitted
@@ -182,6 +183,7 @@ class WEASEL(BaseEstimator, TransformerMixin):
         
         gen  = zip(window_sizes, window_steps)
         jobs = [delayed(_weasel_fit)(X, y, sfa_kwargs, self.chi2_threshold, *args) for args in gen]
+        if self.verbose: print('WEASEL: dispatching %d jobs' % len(jobs), file=sys.stderr)
         res  = Parallel(n_jobs=self.n_jobs, verbose=self.verbose)(jobs)
         
         self._relevant_features_list, self._sfa_list, self._vectorizer_list, X_features = zip(*res)
@@ -217,6 +219,7 @@ class WEASEL(BaseEstimator, TransformerMixin):
         )
         
         jobs       = [delayed(_weasel_transform)(X, *args) for args in gen]
+        if self.verbose: print('WEASEL: dispatching %d jobs' % len(jobs), file=sys.stderr)
         X_features = Parallel(n_jobs=self.n_jobs, verbose=self.verbose)(jobs)
         return hstack(X_features)
 
