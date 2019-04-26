@@ -9,6 +9,22 @@ from warnings import warn
 from ..preprocessing import StandardScaler
 
 
+def im2real(X):
+    X = np.vstack([np.real(X), np.imag(X)])
+    X = X.reshape(X.shape[0] // 2, X.shape[1] * 2, order='F')
+    return X
+
+def trim_to_length(X, n):
+    # First remove the first imaginary coeff
+    X = np.delete(X, [0], axis=1)
+    
+    # Then (maybe) remove last imaginary coeff
+    if X.shape[1] != n:
+        X = X[:,:-1]
+    
+    return X
+
+
 class DiscreteFourierTransform(BaseEstimator, TransformerMixin):
     """Discrete Fourier Transform.
 
@@ -53,128 +69,59 @@ class DiscreteFourierTransform(BaseEstimator, TransformerMixin):
 
     """
 
-    def __init__(self, n_coefs=None, drop_sum=False, anova=False,
-                 norm_mean=False, norm_std=False):
-        self.n_coefs = n_coefs
-        self.drop_sum = drop_sum
-        self.anova = anova
+    def __init__(self, n_coefs=None, drop_sum=False, anova=False, norm_mean=False, norm_std=False):
+        
+        self.n_coefs   = n_coefs
+        self.drop_sum  = drop_sum
+        self.anova     = anova
         self.norm_mean = norm_mean
-        self.norm_std = norm_std
-
+        self.norm_std  = norm_std
+        
     def fit(self, X, y=None):
-        """Learn indices of the Fourier coefficients to keep.
-
-        Parameters
-        ----------
-        X : array-like, shape = (n_samples, n_timestamps)
-            Training vector.
-
-        y : None or array-like, shape = (n_samples,) (default = None)
-            Class labels for each data sample. Only used if ``anova=True``.
-
-        Returns
-        -------
-        self : object
-
-        """
-        if self.anova:
-            X, y = check_X_y(X, y, dtype='float64')
-        else:
-            X = check_array(X, dtype='float64')
-
-        n_samples, n_timestamps = X.shape
-        n_coefs = self._check_params(n_timestamps)
-        if self.anova:
-            ss = StandardScaler(self.norm_mean, self.norm_std)
-            X = ss.fit_transform(X)
-            X_fft = np.fft.rfft(X)
-            X_fft = np.vstack([np.real(X_fft), np.imag(X_fft)])
-            if n_timestamps % 2 == 0:
-                X_fft = X_fft.reshape(n_samples, n_timestamps + 2, order='F')
-                X_fft = np.c_[X_fft[:, 0], X_fft[:, 2:-1]]
-            else:
-                X_fft = X_fft.reshape(n_samples, n_timestamps + 1, order='F')
-                X_fft = np.c_[X_fft[:, 0], X_fft[:, 2:]]
-            if self.drop_sum:
-                X_fft = X_fft[:, 1:]
-            self.support_ = self._anova(X_fft, y, n_coefs, n_timestamps)
-        else:
-            self.support_ = np.arange(n_coefs)
+        _ = self.fit_transform(X, y)
         return self
-
+        
     def transform(self, X):
-        """Return the selected Fourier coefficients for each sample.
-
-        Parameters
-        ----------
-        X : array-like, shape (n_samples, n_timestamps)
-            Input data.
-
-        Returns
-        -------
-        X_new : array, shape (n_samples, n_coefs)
-            The selected Fourier coefficients for each sample.
-
-        """
         check_is_fitted(self, 'support_')
         X = check_array(X, dtype='float64')
         n_samples, n_timestamps = X.shape
-
-        ss = StandardScaler(self.norm_mean, self.norm_std)
-        X = ss.fit_transform(X)
+        
+        scaler = StandardScaler(self.norm_mean, self.norm_std)
+        X      = scaler.fit_transform(X)
+        
         X_fft = np.fft.rfft(X)
-        X_fft = np.vstack([np.real(X_fft), np.imag(X_fft)])
-        if n_timestamps % 2 == 0:
-            X_fft = X_fft.reshape(n_samples, n_timestamps + 2, order='F')
-            X_fft = np.c_[X_fft[:, 0], X_fft[:, 2:-1]]
-        else:
-            X_fft = X_fft.reshape(n_samples, n_timestamps + 1, order='F')
-            X_fft = np.c_[X_fft[:, 0], X_fft[:, 2:]]
+        X_fft = im2real(X_fft)
+        X_fft = trim_to_length(X_fft, n_timestamps)
+        
         if self.drop_sum:
             X_fft = X_fft[:, 1:]
+        
         return X_fft[:, self.support_]
-
+        
     def fit_transform(self, X, y=None):
-        """Learn and return the Fourier coeeficients to keep.
-
-        Parameters
-        ----------
-        X : array-like, shape = (n_samples, n_timestamps)
-            Training vector, where n_samples in the number of samples and
-            n_features is the number of features.
-
-        y : None or array-like, shape = (n_samples,) (default = None)
-            Class labels for each data sample.
-
-        Returns
-        -------
-        X_new : array, shape (n_samples, n_coefs)
-            The selected Fourier coefficients for each sample.
-
-        """
         if self.anova:
             X, y = check_X_y(X, y, dtype='float64')
         else:
             X = check_array(X, dtype='float64')
+        
         n_samples, n_timestamps = X.shape
         n_coefs = self._check_params(n_timestamps)
-
+        
         scaler = StandardScaler(self.norm_mean, self.norm_std)
-        X = scaler.fit_transform(X)
+        X      = scaler.fit_transform(X)
+        
         X_fft = np.fft.rfft(X)
-        X_fft = np.vstack([np.real(X_fft), np.imag(X_fft)])
-        if n_timestamps % 2 == 0:
-            X_fft = X_fft.reshape(n_samples, n_timestamps + 2, order='F')
-            X_fft = np.c_[X_fft[:, 0], X_fft[:, 2:-1]]
-        else:
-            X_fft = X_fft.reshape(n_samples, n_timestamps + 1, order='F')
-            X_fft = np.c_[X_fft[:, 0], X_fft[:, 2:]]
+        X_fft = im2real(X_fft)
+        X_fft = trim_to_length(X_fft, n_timestamps)
+        
         if self.drop_sum:
             X_fft = X_fft[:, 1:]
+        
         if self.anova:
             self.support_ = self._anova(X_fft, y, n_coefs, n_timestamps)
         else:
             self.support_ = np.arange(n_coefs)
+        
         return X_fft[:, self.support_]
 
     def _anova(self, X_fft, y, n_coefs, n_timestamps):
