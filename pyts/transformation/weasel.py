@@ -50,6 +50,9 @@ def _weasel_fit(X, y, sfa_kwargs, chi2_threshold, window_size, window_step):
 
 
 def _weasel_transform(X, window_size, window_step, sfa, vec, relevant_features):
+    
+    print('_weasel_transform', window_size, window_step, file=sys.stderr)
+    
     n_samples, n_timestamps = X.shape
     n_windows  = ((n_timestamps - window_size + window_step) // window_step)
     
@@ -87,6 +90,12 @@ class WEASEL(BaseEstimator, TransformerMixin):
             verbose=10,
             fast_dft=False
         ):
+        
+        shuffle_jobs = True
+        if shuffle_jobs:
+            perm         = np.random.permutation(len(window_sizes))
+            window_sizes = [window_sizes[i] for i in perm]
+            window_steps = [window_steps[i] for i in perm]
         
         self.word_size      = word_size
         self.n_bins         = n_bins
@@ -150,12 +159,14 @@ class WEASEL(BaseEstimator, TransformerMixin):
             self._window_steps,
             self._sfa_list,
             self._vec_list,
-            self._relevant_features_list
+            self._relevant_features_list,
         )
         
-        jobs       = [delayed(_weasel_transform)(X, *args) for args in gen]
+        jobs = [delayed(_weasel_transform)(X, *args) for args in gen]
         if self.verbose: print('WEASEL: dispatching %d jobs' % len(jobs), file=sys.stderr)
         X_features = Parallel(n_jobs=self.n_jobs, verbose=self.verbose)(jobs)
+        
+        # X_features = [_weasel_transform(X, *args) for args in gen]
         
         return hstack(X_features)
         

@@ -91,18 +91,9 @@ class DiscreteFourierTransform(BaseEstimator, TransformerMixin):
         self.window_size = window_size
         self.window_step = window_step
     
-    def _compute_fft(self, X):
-        if not self.fast:
-            X_fft = self._windowed_fft(X_windowed)
-            n_samples, n_timestamps = X_windowed.shape
-        else:
-            assert self.window_size
-            assert self.window_step
-            X_fft = self._fast_fft(X, self.window_size, self.window_step)
-            X_fft = X_fft.reshape(-1, X_fft.shape[-1])
-            n_samples, n_timestamps = X_fft.shape[0], self.window_size
-        
+    def _postprocess_fft(self, X_fft, n_samples, n_timestamps):
         X_fft = np.vstack([np.real(X_fft), np.imag(X_fft)])
+        
         if n_timestamps % 2 == 0:
             X_fft = X_fft.reshape(n_samples, n_timestamps + 2, order='F')
             X_fft = np.c_[X_fft[:, 0], X_fft[:, 2:-1]]
@@ -115,6 +106,24 @@ class DiscreteFourierTransform(BaseEstimator, TransformerMixin):
         
         return X_fft
     
+    def _compute_fft(self, X):
+        if not self.fast:
+            X_fft = self._windowed_fft(X_windowed)
+            n_samples, n_timestamps = X_windowed.shape
+        else:
+            assert self.window_size
+            assert self.window_step
+            # !! Memory efficiency:
+            #   Inference: chunk the matrix here, and grab the necessary words
+            #   Training:  use a random sample of rows to find support?
+            
+            X_fft = self._fast_fft(X, self.window_size, self.window_step)
+            X_fft = X_fft.reshape(-1, X_fft.shape[-1])
+            print('X_fft.shape', X_fft.shape)
+            n_samples, n_timestamps = X_fft.shape[0], self.window_size
+        
+        return self._postprocess_fft(X_fft, n_samples, n_timestamps)
+    
     def _windowed_fft(self, X):
         
         # print('_windowed_fft', file=sys.stderr)
@@ -126,9 +135,7 @@ class DiscreteFourierTransform(BaseEstimator, TransformerMixin):
         
     def _fast_fft(self, X, window_size, window_step, do_center=True, do_scale=True):
         
-        # print('_fast_fft', file=sys.stderr)
-        
-        # !! X can't be windowed
+        print('_fast_fft', file=sys.stderr)
         
         X_fft = signal.stft(
             X,
@@ -193,6 +200,9 @@ class DiscreteFourierTransform(BaseEstimator, TransformerMixin):
             self.support_ = self._anova(X_fft, y, n_coefs, n_timestamps)
         else:
             self.support_ = np.arange(n_coefs)
+        
+        # print('X_fft.shape', X_fft.shape)
+        # print('self.support_.shape', self.support_.shape)
         
         return X_fft[:, self.support_]
         
