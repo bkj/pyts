@@ -1,5 +1,7 @@
 """Code for Symbolic Fourier Approximation."""
 
+import numpy as np
+
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.pipeline import Pipeline
 from sklearn.utils.validation import check_is_fitted
@@ -99,10 +101,10 @@ class SymbolicFourierApproximation(BaseEstimator, TransformerMixin):
         
     def transform(self, X):
         check_is_fitted(self, ['support_', 'bin_edges_'])
-        return self._pipeline.transform(X)
+        return self.mcb.transform(self.dft.transform(X))
         
     def fit_transform(self, X, y=None):
-        dft = DiscreteFourierTransform(
+        self.dft = DiscreteFourierTransform(
             n_coefs=self.n_coefs,
             drop_sum=self.drop_sum,
             anova=self.anova,
@@ -114,14 +116,22 @@ class SymbolicFourierApproximation(BaseEstimator, TransformerMixin):
             window_step=self.window_step if self.fast_dft else None,
         )
         
-        mcb = MultipleCoefficientBinning(
+        self.mcb = MultipleCoefficientBinning(
             n_bins=self.n_bins,
             strategy=self.strategy,
             alphabet=self.alphabet,
         )
         
-        self._pipeline = Pipeline([('dft', dft), ('mcb', mcb)])
-        X_sfa = self._pipeline.fit_transform(X, y)
-        self.support_   = self._pipeline.named_steps['dft'].support_
-        self.bin_edges_ = self._pipeline.named_steps['mcb'].bin_edges_
+        X_sfa = self.dft.fit_transform(X, y)
+        
+        # !! Hacky
+        if self.fast_dft:
+            n_timestamps = X.shape[1]
+            n_windows  = (n_timestamps - self.window_size + self.window_step) // self.window_step
+            y = np.repeat(y, n_windows)
+        
+        X_sfa = self.mcb.fit_transform(X_sfa, y)
+        
+        self.support_   = self.dft.support_
+        self.bin_edges_ = self.mcb.bin_edges_
         return X_sfa

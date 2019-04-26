@@ -15,6 +15,7 @@ from ..preprocessing import StandardScaler
 from numba import jit
 from scipy import signal
 
+# !! Should try to compile this ahead of time
 @jit(nopython=True)
 def roll_std(X, window_size, window_step):
     n_samples, n_timestamps = X.shape
@@ -92,14 +93,16 @@ class DiscreteFourierTransform(BaseEstimator, TransformerMixin):
     
     def _compute_fft(self, X):
         if not self.fast:
-            X_fft = self._windowed_fft(X)
-            n_samples, n_timestamps = X.shape
+            X_fft = self._windowed_fft(X_windowed)
+            n_samples, n_timestamps = X_windowed.shape
         else:
             assert self.window_size
             assert self.window_step
             X_fft = self._fast_fft(X, self.window_size, self.window_step)
+            X_fft = X_fft.reshape(-1, X_fft.shape[-1])
             n_samples, n_timestamps = X_fft.shape[0], self.window_size
         
+        X_fft = np.vstack([np.real(X_fft), np.imag(X_fft)])
         if n_timestamps % 2 == 0:
             X_fft = X_fft.reshape(n_samples, n_timestamps + 2, order='F')
             X_fft = np.c_[X_fft[:, 0], X_fft[:, 2:-1]]
@@ -119,8 +122,6 @@ class DiscreteFourierTransform(BaseEstimator, TransformerMixin):
         scaler = StandardScaler(self.norm_mean, self.norm_std)
         X      = scaler.fit_transform(X)
         X_fft  = np.fft.rfft(X)
-        X_fft  = np.vstack([np.real(X_fft), np.imag(X_fft)])
-        
         return X_fft
         
     def _fast_fft(self, X, window_size, window_step, do_center=True, do_scale=True):
@@ -172,9 +173,9 @@ class DiscreteFourierTransform(BaseEstimator, TransformerMixin):
         
         X_fft = self._compute_fft(X)
         return X_fft[:, self.support_]
-
+        
     def fit_transform(self, X, y=None):
-                
+        
         if self.anova:
             X, y = check_X_y(X, y, dtype='float64')
         else:

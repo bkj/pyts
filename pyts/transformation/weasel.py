@@ -16,14 +16,15 @@ from joblib import Parallel, delayed
 
 
 def _weasel_fit(X, y, sfa_kwargs, chi2_threshold, window_size, window_step):
-    vec = CountVectorizer(ngram_range=(1, 2))
-    
     n_samples, n_timestamps = X.shape
+    n_windows = (n_timestamps - window_size + window_step) // window_step
     
     if not sfa_kwargs['fast_dft']:
-        n_windows  = (n_timestamps - window_size + window_step) // window_step
+        raise Exception
         X_windowed = windowed_view(X, window_size=window_size, window_step=window_step)
         X_windowed = X_windowed.reshape(n_samples * n_windows, window_size)
+        
+        print('X_windowed.shape', X_windowed.shape, file=sys.stderr)
         
         sfa   = SymbolicFourierApproximation(**sfa_kwargs)
         X_sfa = sfa.fit_transform(X_windowed, np.repeat(y, n_windows))
@@ -39,6 +40,7 @@ def _weasel_fit(X, y, sfa_kwargs, chi2_threshold, window_size, window_step):
     X_word = X_word.reshape(n_samples, n_windows)
     
     X_bow    = np.asarray([' '.join(X_word[i]) for i in range(n_samples)])
+    vec      = CountVectorizer(ngram_range=(1, 2))
     X_counts = vec.fit_transform(X_bow)
     
     chi2_stats        = chi2(X_counts, y)[0]
@@ -49,11 +51,15 @@ def _weasel_fit(X, y, sfa_kwargs, chi2_threshold, window_size, window_step):
 
 def _weasel_transform(X, window_size, window_step, sfa, vec, relevant_features):
     n_samples, n_timestamps = X.shape
-    
     n_windows  = ((n_timestamps - window_size + window_step) // window_step)
-    X_windowed = windowed_view(X, window_size=window_size, window_step=window_step)
-    X_windowed = X_windowed.reshape(n_samples * n_windows, window_size)
-    X_sfa      = sfa.transform(X_windowed)
+    
+    if not sfa.fast_dft:
+        raise Exception
+        X_windowed = windowed_view(X, window_size=window_size, window_step=window_step)
+        X_windowed = X_windowed.reshape(n_samples * n_windows, window_size)
+        X_sfa      = sfa.transform(X_windowed)
+    else:
+        X_sfa = sfa.transform(X)
     
     X_word = np.asarray([''.join(X_sfa[i]) for i in range(n_samples * n_windows)])
     X_word = X_word.reshape(n_samples, n_windows)

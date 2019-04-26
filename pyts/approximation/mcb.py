@@ -100,6 +100,7 @@ class MultipleCoefficientBinning(BaseEstimator, TransformerMixin):
             Class labels for each sample. Only used if ``strategy='entropy'``.
 
         """
+        
         if self.strategy == 'entropy':
             if y is None:
                 raise ValueError("y cannot be None if strategy='entropy'.")
