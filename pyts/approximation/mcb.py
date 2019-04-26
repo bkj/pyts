@@ -80,7 +80,50 @@ class MultipleCoefficientBinning(BaseEstimator, TransformerMixin):
         self._check_consistent_lengths(X)
         
         return _digitize(X, self.bin_edges_)
-
+    
+    # # <<
+    
+    # def fit(self, X, y):
+    #     X, y = check_X_y(X, y, dtype='float64')
+    #     check_classification_targets(y)
+    #     n_samples, n_timestamps = X.shape
+    #     self._n_timestamps_fit  = n_timestamps
+    #     self._check_params(n_samples)
+    #     self._check_constant(X)
+        
+    #     X = X.astype(np.float32)
+        
+    #     self.trees   = {}
+    #     self.lookups = {}
+    #     self.rots    = {}
+        
+    #     for idx in range(4):
+    #         self.rots[idx] = np.random.normal(0, 1, (X.shape[1], X.shape[1])).astype(np.float32)
+    #         Xr = X @ self.rots[idx]
+            
+    #         tree   = DecisionTreeClassifier(criterion='entropy', max_leaf_nodes=self.n_bins).fit(Xr, y)
+    #         paths  = tree.tree_.decision_path(Xr).toarray()
+    #         leaves = [str(abs(p)) for p in paths]
+            
+    #         self.lookups[idx] = dict(zip(leaves, range(len(leaves))))
+    #         self.trees[idx]   = tree
+        
+    #     return self
+        
+    # def transform(self, X):
+    #     X = X.astype(np.float32)
+        
+    #     for idx in range(4):
+    #         Xr = X @ self.rots[idx]
+            
+    #         paths  = self.trees[idx].tree_.decision_path(Xr).toarray()
+    #         leaves = [str(abs(p)) for p in paths]
+    #         leaves = [self.lookups[idx].get(l, -1) for l in leaves]
+            
+    #     return np.array(leaves).reshape(-1, 1)
+    
+    # # >>
+    
     def _check_params(self, n_samples):
         if not isinstance(self.n_bins, (int, np.integer)):
             raise TypeError("'n_bins' must be an integer.")

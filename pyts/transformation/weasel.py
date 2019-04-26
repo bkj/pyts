@@ -15,6 +15,8 @@ from ..utils import windowed_view
 from ..approximation.dft import DiscreteFourierTransform
 from ..approximation.mcb import MultipleCoefficientBinning
 
+from sklearn.cluster import MiniBatchKMeans
+
 def _weasel_fit(X, y, sfa, chi2_threshold, window_size, window_step):
     n_samples, n_timestamps = X.shape
     n_windows  = ((n_timestamps - window_size + window_step) // window_step)
@@ -91,8 +93,10 @@ class WEASEL(BaseEstimator, TransformerMixin):
     def fit_transform(self, X, y):
         X, y = check_X_y(X, y)
         check_classification_targets(y)
+        
         n_samples, n_timestamps = X.shape
         window_sizes, window_steps = self._check_params(n_timestamps)
+        
         self._window_sizes = window_sizes
         self._window_steps = window_steps
         
@@ -119,17 +123,13 @@ class WEASEL(BaseEstimator, TransformerMixin):
         res  = Parallel(n_jobs=self.n_jobs, verbose=self.verbose)(jobs)
         
         self._rel_feats_list, self._sfa_list, self._vectorizer_list, X_features = zip(*res)
-        
         return hstack(X_features)
 
     def transform(self, X):
-        
         check_is_fitted(self, ['_rel_feats_list', '_sfa_list', '_vectorizer_list'])
-        
         X = check_array(X)
-        n_samples, n_timestamps = X.shape
         
-        X_features = csc_matrix((n_samples, 0), dtype=np.int64)
+        n_samples, n_timestamps = X.shape
         
         gen = zip(
             self._window_sizes,
