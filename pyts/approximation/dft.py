@@ -1,5 +1,6 @@
 """Code for Discrete Fourier Transform."""
 
+import sys
 import numpy as np
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.feature_selection import f_classif
@@ -8,6 +9,29 @@ from math import ceil
 from warnings import warn
 from ..preprocessing import StandardScaler
 
+# --
+# Helpers
+
+from numba import jit
+from scipy import signal
+
+@jit(nopython=True)
+def roll_std(X, window_size, window_step):
+    n_samples, n_timestamps = X.shape
+    n_windows = (n_timestamps - window_size + window_step) // window_step
+    
+    stds = np.zeros((n_samples, n_windows)) - 1
+    
+    for sample_idx in range(n_samples):
+        offset, idx  = 0, 0
+        for idx in range(n_windows):
+            stds[sample_idx,idx] = np.std(X[sample_idx, offset:(offset + window_size)])
+            offset += window_step
+    
+    return stds
+
+# --
+# DFT
 
 class DiscreteFourierTransform(BaseEstimator, TransformerMixin):
     """Discrete Fourier Transform.
@@ -53,53 +77,79 @@ class DiscreteFourierTransform(BaseEstimator, TransformerMixin):
 
     """
 
-    def __init__(self, n_coefs=None, drop_sum=False, anova=False,
-                 norm_mean=False, norm_std=False):
-        self.n_coefs = n_coefs
-        self.drop_sum = drop_sum
-        self.anova = anova
+    def __init__(self, n_coefs=None, drop_sum=False, anova=False, norm_mean=False, norm_std=False, 
+        fast=False, window_size=None, window_step=None):
+        
+        self.n_coefs   = n_coefs
+        self.drop_sum  = drop_sum
+        self.anova     = anova
         self.norm_mean = norm_mean
-        self.norm_std = norm_std
-
+        self.norm_std  = norm_std
+        
+        self.fast        = fast
+        self.window_size = window_size
+        self.window_step = window_step
+    
+    def _compute_fft(self, X):
+        if not self.fast:
+            X_fft = self._windowed_fft(X)
+            n_samples, n_timestamps = X.shape
+        else:
+            assert self.window_size
+            assert self.window_step
+            X_fft = self._fast_fft(X, self.window_size, self.window_step)
+            n_samples, n_timestamps = X_fft.shape[0], self.window_size
+        
+        if n_timestamps % 2 == 0:
+            X_fft = X_fft.reshape(n_samples, n_timestamps + 2, order='F')
+            X_fft = np.c_[X_fft[:, 0], X_fft[:, 2:-1]]
+        else:
+            X_fft = X_fft.reshape(n_samples, n_timestamps + 1, order='F')
+            X_fft = np.c_[X_fft[:, 0], X_fft[:, 2:]]
+        
+        if self.drop_sum:
+            X_fft = X_fft[:, 1:]
+        
+        return X_fft
+    
+    def _windowed_fft(self, X):
+        
+        # print('_windowed_fft', file=sys.stderr)
+        
+        scaler = StandardScaler(self.norm_mean, self.norm_std)
+        X      = scaler.fit_transform(X)
+        X_fft  = np.fft.rfft(X)
+        X_fft  = np.vstack([np.real(X_fft), np.imag(X_fft)])
+        
+        return X_fft
+        
+    def _fast_fft(self, X, window_size, window_step, do_center=True, do_scale=True):
+        
+        # print('_fast_fft', file=sys.stderr)
+        
+        # !! X can't be windowed
+        
+        X_fft = signal.stft(
+            X,
+            nperseg=window_size,
+            noverlap=window_size - window_step,
+            padded=False,
+            boundary=None,
+            window='boxcar',
+            detrend='constant' if do_center else None,
+        )[-1]
+        
+        X_fft = X_fft.transpose((0, 2, 1))
+        X_fft *= window_size
+        
+        if do_scale:
+            X_stds = roll_std(X, window_size, window_step)
+            X_fft /= X_stds[...,np.newaxis]
+        
+        return X_fft
+    
     def fit(self, X, y=None):
-        """Learn indices of the Fourier coefficients to keep.
-
-        Parameters
-        ----------
-        X : array-like, shape = (n_samples, n_timestamps)
-            Training vector.
-
-        y : None or array-like, shape = (n_samples,) (default = None)
-            Class labels for each data sample. Only used if ``anova=True``.
-
-        Returns
-        -------
-        self : object
-
-        """
-        if self.anova:
-            X, y = check_X_y(X, y, dtype='float64')
-        else:
-            X = check_array(X, dtype='float64')
-
-        n_samples, n_timestamps = X.shape
-        n_coefs = self._check_params(n_timestamps)
-        if self.anova:
-            ss = StandardScaler(self.norm_mean, self.norm_std)
-            X = ss.fit_transform(X)
-            X_fft = np.fft.rfft(X)
-            X_fft = np.vstack([np.real(X_fft), np.imag(X_fft)])
-            if n_timestamps % 2 == 0:
-                X_fft = X_fft.reshape(n_samples, n_timestamps + 2, order='F')
-                X_fft = np.c_[X_fft[:, 0], X_fft[:, 2:-1]]
-            else:
-                X_fft = X_fft.reshape(n_samples, n_timestamps + 1, order='F')
-                X_fft = np.c_[X_fft[:, 0], X_fft[:, 2:]]
-            if self.drop_sum:
-                X_fft = X_fft[:, 1:]
-            self.support_ = self._anova(X_fft, y, n_coefs, n_timestamps)
-        else:
-            self.support_ = np.arange(n_coefs)
+        _ = self.fit_transform(X, y)
         return self
 
     def transform(self, X):
@@ -119,64 +169,32 @@ class DiscreteFourierTransform(BaseEstimator, TransformerMixin):
         check_is_fitted(self, 'support_')
         X = check_array(X, dtype='float64')
         n_samples, n_timestamps = X.shape
-
-        ss = StandardScaler(self.norm_mean, self.norm_std)
-        X = ss.fit_transform(X)
-        X_fft = np.fft.rfft(X)
-        X_fft = np.vstack([np.real(X_fft), np.imag(X_fft)])
-        if n_timestamps % 2 == 0:
-            X_fft = X_fft.reshape(n_samples, n_timestamps + 2, order='F')
-            X_fft = np.c_[X_fft[:, 0], X_fft[:, 2:-1]]
-        else:
-            X_fft = X_fft.reshape(n_samples, n_timestamps + 1, order='F')
-            X_fft = np.c_[X_fft[:, 0], X_fft[:, 2:]]
-        if self.drop_sum:
-            X_fft = X_fft[:, 1:]
+        
+        X_fft = self._compute_fft(X)
         return X_fft[:, self.support_]
 
     def fit_transform(self, X, y=None):
-        """Learn and return the Fourier coeeficients to keep.
-
-        Parameters
-        ----------
-        X : array-like, shape = (n_samples, n_timestamps)
-            Training vector, where n_samples in the number of samples and
-            n_features is the number of features.
-
-        y : None or array-like, shape = (n_samples,) (default = None)
-            Class labels for each data sample.
-
-        Returns
-        -------
-        X_new : array, shape (n_samples, n_coefs)
-            The selected Fourier coefficients for each sample.
-
-        """
+                
         if self.anova:
             X, y = check_X_y(X, y, dtype='float64')
         else:
             X = check_array(X, dtype='float64')
+        
         n_samples, n_timestamps = X.shape
         n_coefs = self._check_params(n_timestamps)
-
-        scaler = StandardScaler(self.norm_mean, self.norm_std)
-        X = scaler.fit_transform(X)
-        X_fft = np.fft.rfft(X)
-        X_fft = np.vstack([np.real(X_fft), np.imag(X_fft)])
-        if n_timestamps % 2 == 0:
-            X_fft = X_fft.reshape(n_samples, n_timestamps + 2, order='F')
-            X_fft = np.c_[X_fft[:, 0], X_fft[:, 2:-1]]
-        else:
-            X_fft = X_fft.reshape(n_samples, n_timestamps + 1, order='F')
-            X_fft = np.c_[X_fft[:, 0], X_fft[:, 2:]]
-        if self.drop_sum:
-            X_fft = X_fft[:, 1:]
+        
+        X_fft = self._compute_fft(X)
+        if self.fast:
+            n_windows = (n_timestamps - self.window_size + self.window_step) // self.window_step
+            y = np.repeat(y, n_windows)
+        
         if self.anova:
             self.support_ = self._anova(X_fft, y, n_coefs, n_timestamps)
         else:
             self.support_ = np.arange(n_coefs)
+        
         return X_fft[:, self.support_]
-
+        
     def _anova(self, X_fft, y, n_coefs, n_timestamps):
         if n_coefs < X_fft.shape[1]:
             non_constant = np.where(

@@ -77,86 +77,51 @@ class SymbolicFourierApproximation(BaseEstimator, TransformerMixin):
 
     def __init__(self, n_coefs=None, drop_sum=False, anova=False,
                  norm_mean=False, norm_std=False, n_bins=4,
-                 strategy='quantile', alphabet=None):
-        self.n_coefs = n_coefs
-        self.drop_sum = drop_sum
-        self.anova = anova
+                 strategy='quantile', alphabet=None, 
+                 fast_dft=False, window_size=None, window_step=None):
+        
+        self.n_coefs   = n_coefs
+        self.drop_sum  = drop_sum
+        self.anova     = anova
         self.norm_mean = norm_mean
-        self.norm_std = norm_std
-        self.n_bins = n_bins
-        self.strategy = strategy
-        self.alphabet = alphabet
-
+        self.norm_std  = norm_std
+        self.n_bins    = n_bins
+        self.strategy  = strategy
+        self.alphabet  = alphabet
+        
+        self.fast_dft    = fast_dft
+        self.window_size = window_size
+        self.window_step = window_step
+        
     def fit(self, X, y=None):
-        """Select Fourier coefficients and compute bin edges for each feature.
-
-        Parameters
-        ----------
-        X : array-like, shape = (n_samples, n_timestamps)
-            Data to transform.
-
-        y : None or array-like, shape = (n_samples,)
-            Class labels for each sample. Only used if ``anova=True`` or
-            ``strategy='entropy'.``
-
-        """
-        dft = DiscreteFourierTransform(
-            n_coefs=self.n_coefs, drop_sum=self.drop_sum, anova=self.anova,
-            norm_mean=self.norm_mean, norm_std=self.norm_std
-        )
-        mcb = MultipleCoefficientBinning(
-            n_bins=self.n_bins, strategy=self.strategy, alphabet=self.alphabet
-        )
-        self._pipeline = Pipeline([('dft', dft), ('mcb', mcb)])
-        self._pipeline.fit(X, y)
-        self.support_ = self._pipeline.named_steps['dft'].support_
-        self.bin_edges_ = self._pipeline.named_steps['mcb'].bin_edges_
+        _ = self.fit_transform(X, y)
         return self
-
+        
     def transform(self, X):
-        """Transform the provided data.
-
-        Parameters
-        ----------
-        X : array-like, shape = (n_samples, n_timestamps)
-            Data to transform.
-
-        Returns
-        -------
-        X_new : array, shape = (n_samples, n_coefs)
-            Transformed data.
-
-        """
         check_is_fitted(self, ['support_', 'bin_edges_'])
         return self._pipeline.transform(X)
-
+        
     def fit_transform(self, X, y=None):
-        """Fit then transform the provided data.
-
-        Parameters
-        ----------
-        X : array-like, shape = (n_samples, n_timestamps)
-            Data to transform.
-
-        y : None or array-like, shape = (n_samples,)
-            Class labels for each sample. Only used if ``anova=True`` or
-            ``strategy='entropy'.``
-
-        Returns
-        -------
-        X_new : array-like, shape = (n_samples, n_coefs)
-            Transformed data.
-
-        """
         dft = DiscreteFourierTransform(
-            n_coefs=self.n_coefs, drop_sum=self.drop_sum, anova=self.anova,
-            norm_mean=self.norm_mean, norm_std=self.norm_std
+            n_coefs=self.n_coefs,
+            drop_sum=self.drop_sum,
+            anova=self.anova,
+            norm_mean=self.norm_mean,
+            norm_std=self.norm_std,
+            
+            fast=self.fast_dft,
+            window_size=self.window_size if self.fast_dft else None,
+            window_step=self.window_step if self.fast_dft else None,
         )
+        
         mcb = MultipleCoefficientBinning(
-            n_bins=self.n_bins, strategy=self.strategy, alphabet=self.alphabet
+            n_bins=self.n_bins,
+            strategy=self.strategy,
+            alphabet=self.alphabet,
         )
+        
         self._pipeline = Pipeline([('dft', dft), ('mcb', mcb)])
         X_sfa = self._pipeline.fit_transform(X, y)
-        self.support_ = self._pipeline.named_steps['dft'].support_
+        self.support_   = self._pipeline.named_steps['dft'].support_
         self.bin_edges_ = self._pipeline.named_steps['mcb'].bin_edges_
         return X_sfa
