@@ -8,17 +8,11 @@ from math import ceil
 from warnings import warn
 from ..preprocessing import StandardScaler
 
-
-def im2real(X):
-    X = np.vstack([np.real(X), np.imag(X)])
-    X = X.reshape(X.shape[0] // 2, X.shape[1] * 2, order='F')
-    return X
-
 def trim_to_length(X, n):
-    # First remove the first imaginary coeff
-    X = np.delete(X, [0], axis=1)
+    # First remove the first complex coeff
+    X = np.delete(X, [X.shape[1] // 2], axis=1)
     
-    # Then (maybe) remove last imaginary coeff
+    # Then (maybe) remove last complex coeff
     if X.shape[1] != n:
         X = X[:,:-1]
     
@@ -26,49 +20,7 @@ def trim_to_length(X, n):
 
 
 class DiscreteFourierTransform(BaseEstimator, TransformerMixin):
-    """Discrete Fourier Transform.
-
-    Parameters
-    ----------
-    n_coefs : None, int or float (default = 1.)
-        The number of Fourier coefficients to keep. If None, all the Fourier
-        coeeficients are kept. If an integer, the ``n_coefs`` most significant
-        Fourier coefficients are returned if ``anova=True``, otherwise the
-        first ``n_coefs`` Fourier coefficients are returned. If a float, it
-        represents a percentage of the size of each time series and must be
-        between 0 and 1. The number of coefficients will be computed as
-        ``ceil(n_coefs * (n_timestamps - 1))`` if ``drop_sum=True`` and
-        ``ceil(n_coefs * n_timestamps)`` if ``drop_sum=False``.
-
-    drop_sum : bool (default = False)
-        If True, the first Fourier coefficient (i.e. the sum of the subseries)
-        is dropped. Otherwise, it is kept.
-
-    anova : bool (default = False)
-        If True, the Fourier coefficient selection is done via a one-way
-        ANOVA test. If False, the first Fourier coefficients are selected.
-
-    norm_mean : bool (default = False)
-        If True, center each time series before scaling.
-
-    norm_std : bool (default = False)
-        If True, scale each time series to unit variance.
-
-    Attributes
-    ----------
-    support_ : array, shape (n_coefs, )
-        Indices of the kept Fourier coefficients.
-
-    References
-    ----------
-    .. [1] P. Schäfer, and M. Högqvist, "SFA: A Symbolic Fourier Approximation
-           and Index for Similarity Search in High Dimensional Datasets",
-           International Conference on Extending Database Technology,
-           15, 516-527 (2012).
-
-
-    """
-
+    
     def __init__(self, n_coefs=None, drop_sum=False, anova=False, norm_mean=False, norm_std=False):
         
         self.n_coefs   = n_coefs
@@ -80,23 +32,31 @@ class DiscreteFourierTransform(BaseEstimator, TransformerMixin):
     def fit(self, X, y=None):
         _ = self.fit_transform(X, y)
         return self
-        
-    def transform(self, X):
-        check_is_fitted(self, 'support_')
-        X = check_array(X, dtype='float64')
+    
+    def _do_fft(self, X):
         n_samples, n_timestamps = X.shape
         
-        scaler = StandardScaler(self.norm_mean, self.norm_std)
-        X      = scaler.fit_transform(X)
-        
-        X_fft = np.fft.rfft(X)
-        X_fft = im2real(X_fft)
-        X_fft = trim_to_length(X_fft, n_timestamps)
+        X_fft  = np.fft.rfft(X)
+        X_fft  = np.hstack([np.real(X_fft), np.imag(X_fft)])
+        X_fft  = trim_to_length(X_fft, n_timestamps)
         
         if self.drop_sum:
             X_fft = X_fft[:, 1:]
         
-        return X_fft[:, self.support_]
+        return X_fft
+        
+    def transform(self, X, chunked=False):
+        check_is_fitted(self, 'support_')
+        X = check_array(X, dtype='float64')
+        
+        scaler = StandardScaler(self.norm_mean, self.norm_std)
+        X      = scaler.fit_transform(X)
+        
+        X_fft = self._do_fft(X)
+        
+        out = X_fft[:, self.support_].copy()
+        del X_fft
+        return out
         
     def fit_transform(self, X, y=None):
         if self.anova:
@@ -104,45 +64,37 @@ class DiscreteFourierTransform(BaseEstimator, TransformerMixin):
         else:
             X = check_array(X, dtype='float64')
         
-        n_samples, n_timestamps = X.shape
-        n_coefs = self._check_params(n_timestamps)
-        
         scaler = StandardScaler(self.norm_mean, self.norm_std)
         X      = scaler.fit_transform(X)
         
-        X_fft = np.fft.rfft(X)
-        X_fft = im2real(X_fft)
-        X_fft = trim_to_length(X_fft, n_timestamps)
+        X_fft = self._do_fft(X)
         
-        if self.drop_sum:
-            X_fft = X_fft[:, 1:]
+        n_timestamps = X.shape[1]
+        n_coefs      = self._check_params(n_timestamps)
         
         if self.anova:
             self.support_ = self._anova(X_fft, y, n_coefs, n_timestamps)
         else:
             self.support_ = np.arange(n_coefs)
         
-        return X_fft[:, self.support_]
-
+        res = X_fft[:, self.support_].copy()
+        del X_fft
+        return res
+        
     def _anova(self, X_fft, y, n_coefs, n_timestamps):
         if n_coefs < X_fft.shape[1]:
-            non_constant = np.where(
-                ~np.isclose(X_fft.var(axis=0), np.zeros_like(X_fft.shape[1]))
-            )[0]
+            non_constant = np.where(X_fft.var(axis=0) > 1e-8)[0]
+            
             if non_constant.size == 0:
-                raise ValueError("All the Fourier coefficients are constant. "
-                                 "Your input data is weirdly homogeneous.")
+                raise ValueError("All the Fourier coefficients are constant.")
             elif non_constant.size < n_coefs:
-                warn("The number of non constant Fourier coefficients ({0}) "
-                     "is lower than the number of coefficients to keep ({1}). "
-                     "The number of coefficients to keep is truncated to {2}"
-                     ".".format(non_constant.size, n_coefs, non_constant.size))
                 support = non_constant
             else:
                 _, p = f_classif(X_fft[:, non_constant], y)
                 support = non_constant[np.argsort(p)[:n_coefs]]
         else:
             support = np.arange(n_coefs)
+        
         return support
 
     def _check_params(self, n_timestamps):

@@ -8,157 +8,87 @@ from sklearn.utils.multiclass import check_classification_targets
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.feature_selection import chi2
-from ..approximation import SymbolicFourierApproximation
-from ..utils import windowed_view
-
+from sklearn.pipeline import Pipeline
 from joblib import Parallel, delayed
 
+from ..utils import windowed_view
+from ..approximation.dft import DiscreteFourierTransform
+from ..approximation.mcb import MultipleCoefficientBinning
 
-def _weasel_fit(X, y, sfa_kwargs, chi2_threshold, window_size, window_step):
+def _weasel_fit(X, y, sfa, chi2_threshold, window_size, window_step):
     n_samples, n_timestamps = X.shape
-    
     n_windows  = ((n_timestamps - window_size + window_step) // window_step)
     
     X_windowed = windowed_view(X, window_size=window_size, window_step=window_step)
     X_windowed = X_windowed.reshape(n_samples * n_windows, window_size)
     
-    sfa = SymbolicFourierApproximation(**sfa_kwargs)
+    X_sfa = sfa.fit_transform(X_windowed, np.repeat(y, n_windows))
     
-    y_repeated = np.repeat(y, n_windows)
-    X_sfa = sfa.fit_transform(X_windowed, y_repeated)
-    
-    X_word = np.asarray([''.join(X_sfa[i]) for i in range(n_samples * n_windows)])
+    X_word = np.asarray([''.join([str(xx) for xx in X_sfa[i]]) for i in range(n_samples * n_windows)])
     X_word = X_word.reshape(n_samples, n_windows)
+    X_bow  = np.asarray([' '.join(X_word[i]) for i in range(n_samples)])
     
-    X_bow = np.asarray([' '.join(X_word[i]) for i in range(n_samples)])
-    vectorizer = CountVectorizer(ngram_range=(1, 2))
-    X_counts = vectorizer.fit_transform(X_bow)
-    chi2_statistics, _ = chi2(X_counts, y)
-    relevant_features = np.where(chi2_statistics > chi2_threshold)[0]
+    vec      = CountVectorizer(ngram_range=(1, 2))
+    X_counts = vec.fit_transform(X_bow)
     
-    return relevant_features, sfa, vectorizer, X_counts[:, relevant_features]
+    chi2_stats, _ = chi2(X_counts, y)
+    rel_feats     = np.where(chi2_stats > chi2_threshold)[0]
+    
+    return rel_feats, sfa, vec, X_counts[:, rel_feats]
 
 
-def _weasel_transform(X, window_size, window_step, sfa, vectorizer, relevant_features):
+def _weasel_transform(X, window_size, window_step, sfa, vec, rel_feats, chunk_size=1e8):
     n_samples, n_timestamps = X.shape
-    
     n_windows  = ((n_timestamps - window_size + window_step) // window_step)
-    X_windowed = windowed_view(X, window_size=window_size, window_step=window_step)
-    X_windowed = X_windowed.reshape(n_samples * n_windows, window_size)
-    X_sfa      = sfa.transform(X_windowed)
     
-    X_word     = np.asarray([''.join(X_sfa[i]) for i in range(n_samples * n_windows)])
-    X_word     = X_word.reshape(n_samples, n_windows)
-    X_bow      = np.asarray([' '.join(X_word[i]) for i in range(n_samples)])
-    X_counts   = vectorizer.transform(X_bow)[:, relevant_features]
+    def _transform_chunk(X_chunk):
+        Xw = windowed_view(X_chunk, window_size=window_size, window_step=window_step)
+        Xw = Xw.reshape(X_chunk.shape[0] * n_windows, window_size)
+        return sfa.transform(Xw)
     
-    return X_counts
+    Xw_sz = X[0,0].nbytes * (n_windows * window_size)
+    X_sfa = [_transform_chunk(X_chunk) for X_chunk in np.array_split(X, 1 + Xw_sz // chunk_size)]
+    X_sfa = np.vstack(X_sfa)
+    
+    X_word = np.asarray([''.join([str(xx) for xx in X_sfa[i]]) for i in range(n_samples * n_windows)])
+    X_word = X_word.reshape(n_samples, n_windows)
+    X_bow  = np.asarray([' '.join(X_word[i]) for i in range(n_samples)])
+    
+    X_counts = vec.transform(X_bow)
+    
+    return X_counts[:, rel_feats]
 
 
 class WEASEL(BaseEstimator, TransformerMixin):
-    """Word ExtrAction for time SEries cLassification.
-
-    Parameters
-    ----------
-    word_size : int (default = 4)
-        Size of each word.
-
-    n_bins : int (default = 4)
-        The number of bins to produce. It must be between 2 and 26.
-
-    window_sizes : array-like (default = [0.1, 0.3, 0.5, 0.7, 0.9])
-        Size of the sliding windows. All the elements must be either integers
-        or floats. In the latter case, each element represents the percentage
-        of the size of each time series and must be between 0 and 1; the size
-        of the sliding windows will be computed as
-        ``np.ceil(window_sizes * n_timestamps)``.
-
-    window_steps : None or array-like (default = None)
-        Step of the sliding windows. If None, each ``window_step`` is equal to
-        ``window_size`` so that the windows are non-overlapping. Otherwise, all
-        the elements must be either integers or floats. In the latter case,
-        each element represents the percentage of the size of each time series
-        and must be between 0 and 1; the step of the sliding windows will be
-        computed as ``np.ceil(window_steps * n_timestamps)``.
-
-    anova : bool (default = True)
-        If True, the Fourier coefficient selection is done via a one-way
-        ANOVA test. If False, the first Fourier coefficients are selected.
-
-    drop_sum : bool (default = True)
-        If True, the first Fourier coefficient (i.e. the sum of the subseries)
-        is dropped. Otherwise, it is kept.
-
-    norm_mean : bool (default = True)
-        If True, center each subseries before scaling.
-
-    norm_std : bool (default = True)
-        If True, scale each subseries to unit variance.
-
-    strategy : str (default = 'entropy')
-        Strategy used to define the widths of the bins:
-
-        - 'uniform': All bins in each sample have identical widths
-        - 'quantile': All bins in each sample have the same number of points
-        - 'normal': Bin edges are quantiles from a standard normal distribution
-        - 'entropy': Bin edges are computed using information gain
-
-    chi2_threshold : int or float (default = 2)
-        The threshold used to perform feature selection. Only the words with
-        a chi2 statistic above this threshold will be kept.
-
-    alphabet : None, 'ordinal' or array-like, shape = (n_bins,)
-        Alphabet to use. If None, the first `n_bins` letters of the Latin
-        alphabet are used.
-
-    References
-    ----------
-    .. [1] P. Schäfer, and U. Leser, "Fast and Accurate Time Series
-           Classification with WEASEL". Conference on Information and Knowledge
-           Management, 637-646 (2017).
-
-    """
-
     def __init__(self, word_size=4, n_bins=4,
                  window_sizes=[0.1, 0.3, 0.5, 0.7, 0.9], window_steps=None,
                  anova=True, drop_sum=True, norm_mean=True, norm_std=True,
-                 strategy='entropy', chi2_threshold=2, alphabet=None, n_jobs=1, verbose=10):
-        self.word_size = word_size
-        self.n_bins = n_bins
-        self.window_sizes = window_sizes
-        self.window_steps = window_steps
-        self.anova = anova
-        self.drop_sum = drop_sum
-        self.norm_mean = norm_mean
-        self.norm_std = norm_std
-        self.n_bins = n_bins
-        self.strategy = strategy
+                 chi2_threshold=2, n_jobs=1, verbose=10):
+        
+        do_shuffle = True
+        if do_shuffle:
+            perm = np.random.permutation(len(window_sizes))
+            window_sizes = [window_sizes[i] for i in perm]
+            window_steps = [window_steps[i] for i in perm]
+        
+        self.word_size      = word_size
+        self.n_bins         = n_bins
+        self.window_sizes   = window_sizes
+        self.window_steps   = window_steps
+        self.anova          = anova
+        self.drop_sum       = drop_sum
+        self.norm_mean      = norm_mean
+        self.norm_std       = norm_std
+        self.n_bins         = n_bins
         self.chi2_threshold = chi2_threshold
-        self.alphabet = alphabet
-        self.n_jobs = n_jobs
-        self.verbose = verbose
+        self.n_jobs         = n_jobs
+        self.verbose        = verbose
     
     def fit(self, X, y):
         _ = self.fit_transform(X, y)
         return self
     
     def fit_transform(self, X, y):
-        """Fit the model according to the given training data.
-
-        Parameters
-        ----------
-        X : array-like, shape = (n_samples, n_timestamps)
-            Training vector, where n_samples in the number of samples and
-            n_features is the number of features.
-
-        y : array-like, shape = (n_samples,)
-            Class labels for each data sample.
-
-        Returns
-        -------
-        self : object
-
-        """
         X, y = check_X_y(X, y)
         check_classification_targets(y)
         n_samples, n_timestamps = X.shape
@@ -166,44 +96,35 @@ class WEASEL(BaseEstimator, TransformerMixin):
         self._window_sizes = window_sizes
         self._window_steps = window_steps
         
-        self._sfa_list = []
-        self._vectorizer_list = []
-        self._relevant_features_list = []
-        
-        sfa_kwargs = {
+        dft_params = {
             "n_coefs"    : self.word_size,
             "drop_sum"   : self.drop_sum,
             "anova"      : self.anova,
             "norm_mean"  : self.norm_mean,
             "norm_std"   : self.norm_std,
-            "n_bins"     : self.n_bins,
-            "strategy"   : self.strategy,
-            "alphabet"   : self.alphabet
         }
         
+        mcb_params = {
+            "n_bins" : self.n_bins,
+        }
+        
+        sfa = Pipeline([
+            ('dft', DiscreteFourierTransform(**dft_params)),
+            ('mcb', MultipleCoefficientBinning(**mcb_params))
+        ])
+        
         gen  = zip(window_sizes, window_steps)
-        jobs = [delayed(_weasel_fit)(X, y, sfa_kwargs, self.chi2_threshold, *args) for args in gen]
+        jobs = [delayed(_weasel_fit)(X, y, sfa, self.chi2_threshold, *args) for args in gen]
         if self.verbose: print('WEASEL: dispatching %d jobs' % len(jobs), file=sys.stderr)
         res  = Parallel(n_jobs=self.n_jobs, verbose=self.verbose)(jobs)
         
-        self._relevant_features_list, self._sfa_list, self._vectorizer_list, X_features = zip(*res)
+        self._rel_feats_list, self._sfa_list, self._vectorizer_list, X_features = zip(*res)
+        
         return hstack(X_features)
 
     def transform(self, X):
-        """Transform the provided data.
-
-        Parameters
-        ----------
-        X : array-like, shape (n_samples, n_timestamps)
-            Test samples.
-
-        Returns
-        -------
-        X_new : sparse matrix, shape = (n_samples, n_features)
-            Document-term matrix with relevant features only.
-
-        """
-        check_is_fitted(self, ['_relevant_features_list', '_sfa_list', '_vectorizer_list'])
+        
+        check_is_fitted(self, ['_rel_feats_list', '_sfa_list', '_vectorizer_list'])
         
         X = check_array(X)
         n_samples, n_timestamps = X.shape
@@ -215,10 +136,10 @@ class WEASEL(BaseEstimator, TransformerMixin):
             self._window_steps,
             self._sfa_list,
             self._vectorizer_list,
-            self._relevant_features_list
+            self._rel_feats_list
         )
         
-        jobs       = [delayed(_weasel_transform)(X, *args) for args in gen]
+        jobs = [delayed(_weasel_transform)(X, *args) for args in gen]
         if self.verbose: print('WEASEL: dispatching %d jobs' % len(jobs), file=sys.stderr)
         X_features = Parallel(n_jobs=self.n_jobs, verbose=self.verbose)(jobs)
         return hstack(X_features)
