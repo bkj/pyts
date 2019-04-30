@@ -119,7 +119,6 @@ class DiscreteFourierTransform(BaseEstimator, TransformerMixin):
             
             X_fft = self._fast_fft(X, self.window_size, self.window_step)
             X_fft = X_fft.reshape(-1, X_fft.shape[-1])
-            print('X_fft.shape', X_fft.shape)
             n_samples, n_timestamps = X_fft.shape[0], self.window_size
         
         return self._postprocess_fft(X_fft, n_samples, n_timestamps)
@@ -135,7 +134,7 @@ class DiscreteFourierTransform(BaseEstimator, TransformerMixin):
         
     def _fast_fft(self, X, window_size, window_step, do_center=True, do_scale=True):
         
-        print('_fast_fft', file=sys.stderr)
+        # print('_fast_fft', file=sys.stderr)
         
         X_fft = signal.stft(
             X,

@@ -24,8 +24,6 @@ def _weasel_fit(X, y, sfa_kwargs, chi2_threshold, window_size, window_step):
         X_windowed = windowed_view(X, window_size=window_size, window_step=window_step)
         X_windowed = X_windowed.reshape(n_samples * n_windows, window_size)
         
-        print('X_windowed.shape', X_windowed.shape, file=sys.stderr)
-        
         sfa   = SymbolicFourierApproximation(**sfa_kwargs)
         X_sfa = sfa.fit_transform(X_windowed, np.repeat(y, n_windows))
     else:
@@ -50,8 +48,6 @@ def _weasel_fit(X, y, sfa_kwargs, chi2_threshold, window_size, window_step):
 
 
 def _weasel_transform(X, window_size, window_step, sfa, vec, relevant_features):
-    
-    print('_weasel_transform', window_size, window_step, file=sys.stderr)
     
     n_samples, n_timestamps = X.shape
     n_windows  = ((n_timestamps - window_size + window_step) // window_step)
