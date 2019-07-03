@@ -49,8 +49,7 @@ class DiscreteFourierTransform(BaseEstimator, TransformerMixin):
         check_is_fitted(self, 'support_')
         X = check_array(X, dtype='float64')
         
-        scaler = StandardScaler(self.norm_mean, self.norm_std)
-        X      = scaler.fit_transform(X)
+        X = StandardScaler(self.norm_mean, self.norm_std).fit_transform(X)
         
         X_fft = self._do_fft(X)
         
@@ -64,8 +63,7 @@ class DiscreteFourierTransform(BaseEstimator, TransformerMixin):
         else:
             X = check_array(X, dtype='float64')
         
-        scaler = StandardScaler(self.norm_mean, self.norm_std)
-        X      = scaler.fit_transform(X)
+        X = StandardScaler(self.norm_mean, self.norm_std).fit_transform(X)
         
         X_fft = self._do_fft(X)
         
